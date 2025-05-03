@@ -338,7 +338,7 @@ void endIfElseStatement() {
  * Start a for loop with initialization, condition, and increment
  * Fixed version to ensure loop counter is properly allocated
  */
-void startForLoop(Value* initVal, const char* counter, Value* endVal) {
+ void startForLoop(Value* initVal, const char* counter, Value* endVal) {
     if (!initVal || !endVal) {
         yyerror("Null values in for loop");
         return;
@@ -349,72 +349,52 @@ void startForLoop(Value* initVal, const char* counter, Value* endVal) {
     // Store the loop counter name
     loopCounterName = std::string(counter);
     
-    // Make sure the counter variable is properly allocated first
-    // This ensures it exists in the symbol table
+    // Allocate and initialize loop counter
     Value* counterPtr = getFromSymbolTable(counter);
-    
-    // Initialize loop counter with the initial value
     builder.CreateStore(initVal, counterPtr);
     loopCounter = counterPtr;
     loopEndValue = endVal;
     
-    // Create loop header block (for condition check)
+    // Create loop blocks
     loopHeaderBlock = BasicBlock::Create(context, "loop_header", func);
-    
-    // Create loop body block
     loopBodyBlock = BasicBlock::Create(context, "loop_body", func);
-    
-    // Create loop end block
     loopEndBlock = BasicBlock::Create(context, "loop_end");
     
-    // Branch from current block to loop header
+    // Branch to loop header
     builder.CreateBr(loopHeaderBlock);
     
     // Set insert point to loop header
     builder.SetInsertPoint(loopHeaderBlock);
     
-    // Load current value of counter
+    // Load current counter value
     Value* currentVal = builder.CreateLoad(builder.getDoubleTy(), counterPtr, "current_val");
     
-    // Create condition (counter < end value)
+    // Check condition (counter < endVal)
     Value* condition = builder.CreateFCmpOLT(currentVal, endVal, "loop_cond");
     
-    // Branch to loop body or end based on condition
+    // Branch based on condition
     builder.CreateCondBr(condition, loopBodyBlock, loopEndBlock);
     
     // Set insert point to loop body
     builder.SetInsertPoint(loopBodyBlock);
 }
 
-/*
- * End a for loop - create the increment and branching back to header
- */
 void endForLoop() {
     if (!loopCounter) {
         yyerror("Null loop counter in endForLoop");
         return;
     }
-    
-    // Get loop counter
     Value* counterPtr = loopCounter;
-    
-    // Load current value
     Value* currentVal = builder.CreateLoad(builder.getDoubleTy(), counterPtr, "current_val");
-    
-    // Increment counter by 1
+    printfLLVM("Counter before increment: %lf\n", currentVal); // Debug print
     Value* incrementedVal = builder.CreateFAdd(currentVal, createDoubleConstant(1.0), "incremented_val");
-    
-    // Store incremented value back to counter
     builder.CreateStore(incrementedVal, counterPtr);
-    
-    // Branch back to loop header for next iteration
-    builder.CreateBr(loopHeaderBlock);
-    
-    // Add loop end block to function
+    printfLLVM("Counter after increment: %lf\n", incrementedVal); // Debug print
+    if (!builder.GetInsertBlock()->getTerminator()) {
+        builder.CreateBr(loopHeaderBlock);
+    }
     Function *func = builder.GetInsertBlock()->getParent();
     func->getBasicBlockList().push_back(loopEndBlock);
-    
-    // Set insert point to loop end block
     builder.SetInsertPoint(loopEndBlock);
 }
 
