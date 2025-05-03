@@ -25,6 +25,9 @@
     #endif
 %}
 
+%nonassoc LOWER_THAN_ELSE
+%nonassoc tok_else
+
 %union {
     char *identifier;
     double double_literal;
@@ -63,31 +66,56 @@
 
 %define parse.error verbose
 
+
 %%
 
-program: 
-    /* empty */ { debugBison(1); }
-    | program statement { debugBison(2); }
-    | program function_definition { debugBison(3); }
-    | program statement_list { debugBison(4); addReturnInstr(); }
-;
+
+program:
+    statement_list { debugBison(1); }
 
 statement_list:
-    statement { debugBison(5); }
-    | statement_list statement { debugBison(6); }
-;
+    /* empty */
+    | statement_list statement { debugBison(5); }
+    | statement_list function_definition { debugBison(6); }
+
 
 statement:
-    prints ';' { debugBison(7); }
-    | printd ';' { debugBison(8); }
-    | assignment ';' { debugBison(9); }
-    | if_statement { debugBison(10); }
-    | if_else_statement { debugBison(11); }
-    | for_statement { debugBison(12); }
-    | function_call ';' { debugBison(13); }
-    | return_statement ';' { debugBison(14); }
-    | error ';' { yyerror("Statement error"); yyerrok; }
-;
+    '{' statement_list '}'
+  | prints    ';'
+  | printd    ';'
+  | assignment ';'
+  | function_call ';'
+  | expression ';'
+  | for_statement { debugBison(12); }
+  | return_statement ';'
+
+  /* now the if/else cases: */
+  | tok_if '(' condition ')' 
+      {
+        debugBison(31);
+        handleIfElseStatement($3);
+      }
+    statement
+      {
+        endIfThenBlock();
+      }
+    tok_else
+    statement
+      {
+        endIfElseStatement();
+      }
+  | tok_if '(' condition ')' 
+      %prec LOWER_THAN_ELSE
+      {
+        debugBison(30);
+        handleIfStatement($3);
+      }
+    statement
+      {
+        endIfStatement();
+      }
+    | error ';'  { yyerror("Statement error"); yyerrok; }
+  ;
 
 prints: 
     tok_prints '(' tok_string_literal ')' { debugBison(15); printString($3); free($3); } 
@@ -105,7 +133,6 @@ term:
         free($1); 
     }
     | tok_double_literal { debugBison(18); $$ = createDoubleConstant($1); }
-    | function_call { debugBison(19); $$ = $1; }
     | '(' expression ')' { debugBison(26); $$ = $2; }
 ;
 
@@ -125,23 +152,6 @@ condition:
     expression '>' expression { debugBison(27); $$ = createComparisonOperation($1, $3, '>'); }
     | expression '<' expression { debugBison(28); $$ = createComparisonOperation($1, $3, '<'); }
     | expression tok_eq expression { debugBison(29); $$ = createComparisonOperation($1, $3, '='); }
-;
-
-if_statement:
-    tok_if '(' condition ')' '{' statement_list '}' { 
-        debugBison(30); 
-        handleIfStatement($3); 
-        endIfStatement(); 
-    }
-;
-
-if_else_statement:
-    tok_if '(' condition ')' '{' statement_list '}' tok_else '{' statement_list '}' { 
-        debugBison(31); 
-        handleIfElseStatement($3); 
-        endIfThenBlock();
-        endIfElseStatement(); 
-    }
 ;
 
 for_statement:
@@ -179,13 +189,15 @@ function_definition:
 ;
 
 function_call:
-    tok_identifier '(' argument_list ')' {
+    tok_identifier '(' argument_list ')' ';'
+    {
         debugBison(35);
         $$ = callFunction($1, *$3);
         delete $3;
         free($1);
     }
-    | tok_identifier '(' ')' {
+    | tok_identifier '(' ')' ';'
+    {
         debugBison(36);
         std::vector<Value*> emptyArgs;
         $$ = callFunction($1, emptyArgs);
@@ -215,6 +227,7 @@ return_statement:
 
 %%
 
+
 void yyerror(const char *err) {
     fprintf(stderr, "\nError at line %d: %s\n", yylineno, err);
 }
@@ -235,10 +248,11 @@ int main(int argc, char** argv) {
     int parserResult = yyparse();
     
     if (parserResult == 0) {
-        printLLVMIR();
-        return EXIT_SUCCESS;
+      addReturnInstr();
+      printLLVMIR();
+      return 0;
     } else {
-        fprintf(stderr, "Parsing failed.\n");
-        return EXIT_FAILURE;
+      fprintf(stderr, "Parsing failed.\n");
+      return 1;
     }
 }

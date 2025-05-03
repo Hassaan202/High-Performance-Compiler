@@ -1,8 +1,16 @@
+function foo() { 
+    printd(200);
+    a = 2 + 3;
+    printd(a);
+ }
+
 if (2 > 3){
     prints("Hello");
+} 
+else{
+    prints("Hello else");
 }
 
-for (i = 2; 5){
-    prints("i =");
+for (i = 1; 5){
     printd(i);
 }

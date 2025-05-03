@@ -69,7 +69,7 @@ static Function *mainFunction = nullptr;
 
 /**
 * init LLVM
-* Create main function (similar to C-main) that returns a int but takes no parameters.
+* Create main function that returns a int but takes no parameters.
 */
 static void initLLVM() {
     module = new Module("ssc_program", context);
