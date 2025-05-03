@@ -31,11 +31,11 @@ void printLLVMIR();
 void addReturnInstr();
 Value* createDoubleConstant(double val);
 
-// Added for for-loops
+// handle for-loops
 void startForLoop(Value* initVal, const char* counter, Value* endVal);
 void endForLoop();
 
-// Added for functions
+// handle functions
 Function* defineFunction(const char* name);
 void endFunctionDefinition(Value* returnValue);
 Value* callFunction(const char* name, std::vector<Value*>& args);
@@ -74,7 +74,7 @@ static Function *mainFunction = nullptr;
 static void initLLVM() {
     module = new Module("ssc_program", context);
     
-    // Returns an int and has fixed number of parameters. Do not take any parameters.
+    // Returns an int and does not take any parameters.
     FunctionType *mainTy = FunctionType::get(builder.getInt32Ty(), false);
     
     // The main function definition.
@@ -336,7 +336,6 @@ void endIfElseStatement() {
 
 /*
  * Start a for loop with initialization, condition, and increment
- * Fixed version to ensure loop counter is properly allocated
  */
  void startForLoop(Value* initVal, const char* counter, Value* endVal) {
     if (!initVal || !endVal) {
@@ -386,13 +385,11 @@ void endForLoop() {
     }
     Value* counterPtr = loopCounter;
     Value* currentVal = builder.CreateLoad(builder.getDoubleTy(), counterPtr, "current_val");
-    printfLLVM("Counter before increment: %lf\n", currentVal); // Debug print
+    // printfLLVM("Counter before increment: %lf\n", currentVal); // Debug print
     Value* incrementedVal = builder.CreateFAdd(currentVal, createDoubleConstant(1.0), "incremented_val");
     builder.CreateStore(incrementedVal, counterPtr);
-    printfLLVM("Counter after increment: %lf\n", incrementedVal); // Debug print
-    if (!builder.GetInsertBlock()->getTerminator()) {
-        builder.CreateBr(loopHeaderBlock);
-    }
+    // printfLLVM("Counter after increment: %lf\n", incrementedVal); // Debug print
+    builder.CreateBr(loopHeaderBlock);
     Function *func = builder.GetInsertBlock()->getParent();
     func->getBasicBlockList().push_back(loopEndBlock);
     builder.SetInsertPoint(loopEndBlock);
@@ -400,7 +397,6 @@ void endForLoop() {
 
 /*
  * Define a new function in the SSC language
- * Updated to properly handle function context
  */
 Function* defineFunction(const char* name) {
     // Save current insertion point for later restoration

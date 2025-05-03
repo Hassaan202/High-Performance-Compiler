@@ -1,5 +1,3 @@
-# Makefile for SSC compiler using Flex, Bison, and LLVM
-
 # Compiler 
 CXX = clang++
 LLVM_CONFIG = llvm-config

@@ -1,0 +1,8 @@
+if (2 > 3){
+    prints("Hello");
+}
+
+for (i = 2; 5){
+    prints("i =");
+    printd(i);
+}

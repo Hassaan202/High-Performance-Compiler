@@ -1,0 +1,30 @@
+# Flex and Bison generated files
+lex.yy.c
+ssc.tab.c
+ssc.tab.h
+
+# Compiled binary
+ssc_compiler
+ssc_compiler_ir
+
+# LLVM intermediate files
+*.ll
+output.ll
+output_opt.ll
+
+# Assembly and object files
+*.s
+*.o
+
+# VSCode configuration
+.vscode/
+
+# Debugging files
+a.out
+ssc.output
+
+# Misc
+*.core
+*.tmp
+compile_commands.json
+.cache

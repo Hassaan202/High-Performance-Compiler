@@ -145,12 +145,17 @@ if_else_statement:
 ;
 
 for_statement:
-    tok_for '(' tok_identifier '=' expression ';' expression ')' '{' statement_list '}' { 
-        debugBison(32); 
-        startForLoop($5, $3, $7);
-        endForLoop();
-        free($3);
-    }
+    tok_for '(' tok_identifier '=' expression ';' expression ')' '{'
+        { 
+          debugBison(32);
+          startForLoop($5, $3, $7);
+          free($3);
+        }
+      statement_list
+        { 
+          endForLoop();
+        }
+    '}'
     | tok_for error '{' statement_list '}' { 
         debugBison(40); 
         yyerror("Invalid for loop syntax"); 
