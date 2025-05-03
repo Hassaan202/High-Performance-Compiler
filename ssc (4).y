@@ -151,6 +151,11 @@ for_statement:
         endForLoop();
         free($3);
     }
+    | tok_for error '{' statement_list '}' { 
+        debugBison(40); 
+        yyerror("Invalid for loop syntax"); 
+        yyerrok; 
+    }
 ;
 
 function_definition:
