@@ -1,4 +1,4 @@
-# SSC Compiler
+# HPCLang
 
 A high-performance compiler that translates Simple Script Code (SSC) to LLVM IR for optimized execution.
 
