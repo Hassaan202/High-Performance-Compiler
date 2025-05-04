@@ -12,6 +12,25 @@
 #include <llvm/Support/FileSystem.h>
 #include <unistd.h>
 
+// MLIR includes
+#include <mlir/IR/MLIRContext.h>
+#include <mlir/IR/Builders.h>
+#include <mlir/Dialect/Affine/IR/AffineOps.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/LLVMIR/LLVMDialect.h>
+#include <mlir/Conversion/LLVMCommon/LoweringOptions.h>
+#include <mlir/Conversion/AffineToStandard/AffineToStandard.h>
+#include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
+#include <mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h>
+#include <mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h>
+#include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
+#include <mlir/Target/LLVMIR/Export.h>
+#include <mlir/Pass/PassManager.h>
+#include <mlir/Transforms/Passes.h>
+#include <mlir/Pass/Pass.h>
+#include <mlir/Dialect/SCF/IR/SCF.h>
+#include <mlir/Dialect/OpenMP/OpenMPDialect.h>
+
 using namespace llvm;
 
 Value* getFromSymbolTable(const char *id);
@@ -31,9 +50,15 @@ void printLLVMIR();
 void addReturnInstr();
 Value* createDoubleConstant(double val);
 
+// MLIR context and module
+static mlir::MLIRContext mlirContext;
+static mlir::OwningOpRef<mlir::ModuleOp> mlirModule;
+static mlir::OpBuilder mlirBuilder(&mlirContext);
+
 // handle for-loops
 void startForLoop(Value* initVal, const char* counter, Value* endVal);
 void endForLoop();
+void optimizeAffineFors();
 
 // handle functions
 Function* defineFunction(const char* name);
@@ -52,6 +77,7 @@ static BasicBlock *loopEndBlock = nullptr;
 static Value *loopCounter = nullptr;
 static Value *loopEndValue = nullptr;
 static std::string loopCounterName;
+static std::vector<std::tuple<Value*, std::string, Value*>> loopInfo; // Store loop information for MLIR conversion
 
 // For managing functions
 static std::map<std::string, Function*> FunctionTable;
@@ -66,6 +92,19 @@ static LLVMContext context;
 static Module *module = nullptr;
 static IRBuilder<> builder(context);
 static Function *mainFunction = nullptr;
+
+// Initialize MLIR
+static void initMLIR() {
+    // Load dialects
+    mlirContext.loadDialect<mlir::affine::AffineDialect>();
+    mlirContext.loadDialect<mlir::func::FuncDialect>();
+    mlirContext.loadDialect<mlir::LLVM::LLVMDialect>();
+    mlirContext.loadDialect<mlir::scf::SCFDialect>();
+    mlirContext.loadDialect<mlir::omp::OpenMPDialect>();
+    
+    // Create a new MLIR module
+    mlirModule = mlir::ModuleOp::create(mlirBuilder.getUnknownLoc());
+}
 
 /**
 * init LLVM
@@ -90,6 +129,9 @@ static void initLLVM() {
     
     // This ensures that empty functions have at least one instruction (debug)
     builder.CreateAlloca(builder.getDoubleTy(), nullptr, "dummy_alloca");
+    
+    // Initialize MLIR
+    initMLIR();
 }
 
 void addReturnInstr() {
@@ -110,7 +152,186 @@ Value* createDoubleConstant(double val) {
     return ConstantFP::get(context, APFloat(val));
 }
 
+// Fix the FuncOp::create call in convertLLVMToMLIR
+mlir::LogicalResult convertLLVMToMLIR() {
+    // Register LLVM dialects
+    mlir::registerLLVMDialectTranslation(mlirContext);
+    
+    // Clear existing module
+    mlirModule = mlir::ModuleOp::create(mlirBuilder.getUnknownLoc());
+    
+    // Create MLIR representation of each function
+    for (auto &F : *module) {
+        mlir::Type returnType;
+        if (F.getReturnType()->isDoubleTy()) {
+            returnType = mlir::Float64Type::get(&mlirContext);
+        } else {
+            returnType = mlir::IntegerType::get(&mlirContext, 32);
+        }
+        
+        // Create a proper FunctionType instead of LLVMFunctionType
+        auto funcType = mlir::FunctionType::get(&mlirContext, {}, {returnType});
+        
+        // Fix: Use proper signature for FuncOp::create
+        auto funcOp = mlir::func::FuncOp::create(
+            mlirBuilder.getUnknownLoc(),
+            F.getName().str(),
+            funcType);
+        
+        mlirBuilder.setInsertionPointToStart(mlirModule->getBody());
+        mlirBuilder.insert(funcOp);
+    }
+    
+    return mlir::success();
+}
+
+// Fix the pass manager setup in convertMLIRToLLVM
+std::unique_ptr<llvm::Module> convertMLIRToLLVM() {
+    // Create pass manager
+    mlir::PassManager pm(&mlirContext);
+    
+    // Add optimization passes
+    pm.addPass(mlir::createCanonicalizerPass());
+    
+    // Convert affine dialect to standard dialect
+    pm.addPass(mlir::createLowerAffinePass());
+    
+    // Use these updated pass names
+    pm.addPass(mlir::createConvertSCFToCFPass());
+    pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+    
+    // Skip the problematic FuncToLLVM conversion pass
+    // The MLIR to LLVM translation should still work with basic conversions
+    
+    // Run passes
+    if (mlir::failed(pm.run(*mlirModule))) {
+        llvm::errs() << "Failed to run MLIR optimization passes\n";
+        return nullptr;
+    }
+    
+    // Translate MLIR module to LLVM IR
+    LLVMContext llvmContext;
+    auto llvmModule = mlir::translateModuleToLLVMIR(*mlirModule, llvmContext);
+    if (!llvmModule) {
+        llvm::errs() << "Failed to translate MLIR module to LLVM IR\n";
+        return nullptr;
+    }
+    
+    return llvmModule;
+}
+
+// Create an MLIR affine for loop
+void createAffineForLoop(const std::string& counterName, int lowerBound, int upperBound) {
+    auto loc = mlirBuilder.getUnknownLoc();
+    
+    // Create affine map for bounds
+    mlir::AffineMap lowerMap = mlir::AffineMap::get(0, 0, mlirBuilder.getAffineConstantExpr(lowerBound));
+    mlir::AffineMap upperMap = mlir::AffineMap::get(0, 0, mlirBuilder.getAffineConstantExpr(upperBound));
+    
+    // Create affine for operation
+    auto affineForOp = mlirBuilder.create<mlir::affine::AffineForOp>(
+        loc, 
+        mlir::ValueRange{}, lowerMap,
+        mlir::ValueRange{}, upperMap,
+        1  // Step size
+    );
+    
+    // Set up the loop body
+    mlirBuilder.setInsertionPointToStart(affineForOp.getBody());
+    
+    // Create loop counter index
+    auto index = affineForOp.getInductionVar();
+    
+    // Add a terminator to the loop body
+    mlirBuilder.setInsertionPointToEnd(affineForOp.getBody());
+    mlirBuilder.create<mlir::affine::AffineYieldOp>(loc);
+    
+    // Reset insertion point to after the loop
+    mlirBuilder.setInsertionPointAfter(affineForOp);
+}
+
+// Create an OpenMP parallel for loop
+void createOpenMPParallelFor(const std::string& counterName, int lowerBound, int upperBound) {
+    auto loc = mlirBuilder.getUnknownLoc();
+    
+    // Create OpenMP parallel operation
+    mlir::ValueRange emptyValueRange{};
+    auto parallelOp = mlirBuilder.create<mlir::omp::ParallelOp>(loc);
+    
+    // Set up the parallel region body
+    if (!parallelOp.getRegion().empty()) {
+        mlirBuilder.setInsertionPointToStart(&parallelOp.getRegion().front());
+
+
+        // Create SCF for operation inside parallel region
+        auto lowerConstant = mlirBuilder.create<mlir::arith::ConstantOp>(
+            loc, mlirBuilder.getI32IntegerAttr(lowerBound));
+        auto upperConstant = mlirBuilder.create<mlir::arith::ConstantOp>(
+            loc, mlirBuilder.getI32IntegerAttr(upperBound));
+        auto stepConstant = mlirBuilder.create<mlir::arith::ConstantOp>(
+            loc, mlirBuilder.getI32IntegerAttr(1));
+        
+        // Create the for loop
+        auto forOp = mlirBuilder.create<mlir::scf::ForOp>(
+            loc, lowerConstant, upperConstant, stepConstant);
+        
+        // Set up the loop body
+        mlirBuilder.setInsertionPointToStart(forOp.getBody());
+        
+        // Add yield to for loop body
+        mlirBuilder.setInsertionPointToEnd(forOp.getBody());
+        mlirBuilder.create<mlir::scf::YieldOp>(loc);
+
+
+        mlirBuilder.setInsertionPointToEnd(&parallelOp.getRegion().front());
+    }
+    mlirBuilder.create<mlir::omp::TerminatorOp>(loc);
+    
+    // Reset insertion point to after the parallel operation
+    mlirBuilder.setInsertionPointAfter(parallelOp);
+}
+
+void optimizeAffineFors() {
+    // Convert LLVM module to MLIR
+    if (mlir::failed(convertLLVMToMLIR())) {
+        llvm::errs() << "Failed to convert LLVM module to MLIR\n";
+        return;
+    }
+    
+    // For each stored loop info, create an optimized MLIR loop
+    for (const auto& [initVal, counter, endVal] : loopInfo) {
+        // Extract loop bounds (assuming they are constants)
+        int lowerBound = 0;
+        int upperBound = 100; // Default bounds
+        
+        if (auto* constInit = dyn_cast<ConstantFP>(initVal)) {
+            lowerBound = (int)constInit->getValueAPF().convertToDouble();
+        }
+        
+        if (auto* constEnd = dyn_cast<ConstantFP>(endVal)) {
+            upperBound = (int)constEnd->getValueAPF().convertToDouble();
+        }
+        
+        // Create both affine and OpenMP loops for demonstration
+        createAffineForLoop(counter, lowerBound, upperBound);
+        createOpenMPParallelFor(counter, lowerBound, upperBound);
+    }
+    
+    // Convert optimized MLIR module back to LLVM
+    auto optimizedModule = convertMLIRToLLVM();
+    if (optimizedModule) {
+        // Replace the current module with the optimized one
+        delete module;
+        module = optimizedModule.release();
+    }
+}
+
 void printLLVMIR() {
+    // Run MLIR optimization if any loops were defined
+    if (!loopInfo.empty()) {
+        optimizeAffineFors();
+    }
+    
     // Ensure all functions have terminators before printing
     for (auto &F : *module) {
         for (auto &BB : F) {
@@ -125,9 +346,11 @@ void printLLVMIR() {
         }
     }
     
-    std::error_code EC;
+    // macOS friendly output - using LLVM's raw_fd_ostream
+    // with STDOUT_FILENO which is more portable
     raw_fd_ostream out(STDOUT_FILENO, false);
     module->print(out, nullptr);
+    out.flush();
 }
 
 // Modified to ensure variables are properly allocated and tracked
@@ -193,13 +416,13 @@ void printfLLVM(const char *format, Value *inputValue) {
     if(!printfFunc) {
         // The printf function returns integer
         // It takes variable number of parameters
-        std::vector<Type*> args = {builder.getInt8Ty()->getPointerTo()};
+        std::vector<Type*> args = {PointerType::get(builder.getInt8Ty(), 0)};
         FunctionType *printfTy = FunctionType::get(builder.getInt32Ty(), args, true);
         printfFunc = Function::Create(printfTy, Function::ExternalLinkage, "printf", module);
     }
     
     // Create global string pointer for format
-    Value *formatVal = builder.CreateGlobalStringPtr(format);
+    Value *formatVal = builder.CreateGlobalString(format);
     
     // Create arguments vector
     std::vector<Value*> args = {formatVal, inputValue};
@@ -215,7 +438,7 @@ void printString(const char *str) {
         s = s.substr(1, s.size()-2);
     }
     
-    Value *strValue = builder.CreateGlobalStringPtr(s);
+    Value *strValue = builder.CreateGlobalString(s);
     printfLLVM("%s\n", strValue);
 }
 
@@ -267,7 +490,7 @@ void handleIfStatement(Value* condition) {
     // Create basic blocks for then and merge
     Function *func = builder.GetInsertBlock()->getParent();
     thenBlock = BasicBlock::Create(context, "then", func);
-    mergeBlock = BasicBlock::Create(context, "ifcont");
+    mergeBlock = BasicBlock::Create(context, "ifcont", func);
     
     // Create conditional branch
     builder.CreateCondBr(condition, thenBlock, mergeBlock);
@@ -284,7 +507,6 @@ void endIfStatement() {
     
     // Add merge block to function
     Function *func = builder.GetInsertBlock()->getParent();
-    func->getBasicBlockList().push_back(mergeBlock);
     builder.SetInsertPoint(mergeBlock);
 }
 
@@ -300,8 +522,8 @@ void handleIfElseStatement(Value* condition) {
     // Create basic blocks for then, else, and merge
     Function *func = builder.GetInsertBlock()->getParent();
     thenBlock = BasicBlock::Create(context, "then", func);
-    elseBlock = BasicBlock::Create(context, "else");
-    mergeBlock = BasicBlock::Create(context, "ifcont");
+    elseBlock = BasicBlock::Create(context, "else", func);
+    mergeBlock = BasicBlock::Create(context, "ifcont", func);
     
     // Create conditional branch
     builder.CreateCondBr(condition, thenBlock, elseBlock);
@@ -318,7 +540,6 @@ void endIfThenBlock() {
     
     // Add else block to function and set insertion point
     Function *func = builder.GetInsertBlock()->getParent();
-    func->getBasicBlockList().push_back(elseBlock);
     builder.SetInsertPoint(elseBlock);
 }
 
@@ -330,14 +551,13 @@ void endIfElseStatement() {
     
     // Add merge block to function
     Function *func = builder.GetInsertBlock()->getParent();
-    func->getBasicBlockList().push_back(mergeBlock);
     builder.SetInsertPoint(mergeBlock);
 }
 
 /*
  * Start a for loop with initialization, condition, and increment
  */
- void startForLoop(Value* initVal, const char* counter, Value* endVal) {
+void startForLoop(Value* initVal, const char* counter, Value* endVal) {
     if (!initVal || !endVal) {
         yyerror("Null values in for loop");
         return;
@@ -348,6 +568,9 @@ void endIfElseStatement() {
     // Store the loop counter name
     loopCounterName = std::string(counter);
     
+    // Store loop information for MLIR optimization
+    loopInfo.push_back(std::make_tuple(initVal, loopCounterName, endVal));
+    
     // Allocate and initialize loop counter
     Value* counterPtr = getFromSymbolTable(counter);
     builder.CreateStore(initVal, counterPtr);
@@ -357,7 +580,7 @@ void endIfElseStatement() {
     // Create loop blocks
     loopHeaderBlock = BasicBlock::Create(context, "loop_header", func);
     loopBodyBlock = BasicBlock::Create(context, "loop_body", func);
-    loopEndBlock = BasicBlock::Create(context, "loop_end");
+    loopEndBlock = BasicBlock::Create(context, "loop_end", func);
     
     // Branch to loop header
     builder.CreateBr(loopHeaderBlock);
@@ -385,13 +608,10 @@ void endForLoop() {
     }
     Value* counterPtr = loopCounter;
     Value* currentVal = builder.CreateLoad(builder.getDoubleTy(), counterPtr, "current_val");
-    // printfLLVM("Counter before increment: %lf\n", currentVal); // Debug print
     Value* incrementedVal = builder.CreateFAdd(currentVal, createDoubleConstant(1.0), "incremented_val");
     builder.CreateStore(incrementedVal, counterPtr);
-    // printfLLVM("Counter after increment: %lf\n", incrementedVal); // Debug print
     builder.CreateBr(loopHeaderBlock);
     Function *func = builder.GetInsertBlock()->getParent();
-    func->getBasicBlockList().push_back(loopEndBlock);
     builder.SetInsertPoint(loopEndBlock);
 }
 

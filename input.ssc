@@ -1,16 +1,5 @@
-function foo() { 
-    printd(200);
-    a = 2 + 3;
-    printd(a);
- }
-
-if (2 > 3){
-    prints("Hello");
-} 
-else{
-    prints("Hello else");
+sum = 0;
+for (i = 0; 1000000) {
+    sum = sum + i;
 }
-
-for (i = 1; 5){
-    printd(i);
-}
+printd(sum);
