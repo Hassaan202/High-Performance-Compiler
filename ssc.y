@@ -18,7 +18,6 @@
     
     #define DEBUGBISON
     #ifdef DEBUGBISON
-        // Changed to print to stderr instead of stdout
         #define debugBison(a) (fprintf(stderr, "Rule %d: %s\n", a, __func__))
     #else
         #define debugBison(a)
@@ -42,6 +41,7 @@
 %token tok_if
 %token tok_else
 %token tok_for
+%token tok_pfor
 %token tok_function
 %token tok_return
 %token <identifier> tok_identifier
@@ -51,7 +51,7 @@
 
 %type <value> term expression condition
 %type <block> if_statement if_else_statement statement statement_list
-%type <block> for_statement
+%type <block> for_statement pfor_statement
 %type <block> function_definition
 %type <value> function_call
 %type <value> return_statement
@@ -87,6 +87,7 @@ statement:
   | function_call ';'
   | expression ';'
   | for_statement { debugBison(12); }
+  | pfor_statement { debugBison(13); }
   | return_statement ';'
 
   /* now the if/else cases: */
@@ -169,6 +170,25 @@ for_statement:
     | tok_for error '{' statement_list '}' { 
         debugBison(40); 
         yyerror("Invalid for loop syntax"); 
+        yyerrok; 
+    }
+;
+
+pfor_statement:
+    tok_pfor '(' tok_identifier '=' expression ';' expression ')' '{'
+        { 
+          debugBison(41);
+          startParallelForLoop($5, $3, $7);
+          free($3);
+        }
+      statement_list
+        { 
+          endParallelForLoop();
+        }
+    '}'
+    | tok_pfor error '{' statement_list '}' { 
+        debugBison(42); 
+        yyerror("Invalid parallel for loop syntax"); 
         yyerrok; 
     }
 ;

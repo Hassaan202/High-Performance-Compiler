@@ -30,6 +30,16 @@
 #include <mlir/Pass/Pass.h>
 #include <mlir/Dialect/SCF/IR/SCF.h>
 #include <mlir/Dialect/OpenMP/OpenMPDialect.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
+#include <mlir/IR/DialectRegistry.h>  
+
+#include <mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h>
+#include <mlir/Conversion/OpenMPToLLVM/ConvertOpenMPToLLVM.h> 
+#include <mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h>  
+
+#include <mlir/InitAllDialects.h>    
+#include <mlir/InitAllTranslations.h>  
+
 
 using namespace llvm;
 
@@ -51,7 +61,9 @@ void addReturnInstr();
 Value* createDoubleConstant(double val);
 
 // MLIR context and module
+static mlir::DialectRegistry registry;
 static mlir::MLIRContext mlirContext;
+
 static mlir::OwningOpRef<mlir::ModuleOp> mlirModule;
 static mlir::OpBuilder mlirBuilder(&mlirContext);
 
@@ -70,6 +82,7 @@ static BasicBlock *thenBlock = nullptr;
 static BasicBlock *elseBlock = nullptr;
 static BasicBlock *mergeBlock = nullptr;
 
+
 // For managing for-loop blocks
 static BasicBlock *loopHeaderBlock = nullptr;
 static BasicBlock *loopBodyBlock = nullptr;
@@ -78,6 +91,7 @@ static Value *loopCounter = nullptr;
 static Value *loopEndValue = nullptr;
 static std::string loopCounterName;
 static std::vector<std::tuple<Value*, std::string, Value*>> loopInfo; // Store loop information for MLIR conversion
+
 
 // For managing functions
 static std::map<std::string, Function*> FunctionTable;
@@ -93,14 +107,26 @@ static Module *module = nullptr;
 static IRBuilder<> builder(context);
 static Function *mainFunction = nullptr;
 
-// Initialize MLIR
 static void initMLIR() {
-    // Load dialects
+    // Register essential dialects
+    registry.insert<mlir::affine::AffineDialect, mlir::func::FuncDialect, 
+                   mlir::LLVM::LLVMDialect, mlir::scf::SCFDialect,
+                   mlir::omp::OpenMPDialect, mlir::arith::ArithDialect>();
+    
+    mlir::registerLLVMDialectTranslation(registry);
+
+    mlir::registerOpenMPDialectTranslation(registry);
+    
+    // Initialize context with registry
+    mlirContext.appendDialectRegistry(registry);
+    
+    // Load only the needed dialects
     mlirContext.loadDialect<mlir::affine::AffineDialect>();
     mlirContext.loadDialect<mlir::func::FuncDialect>();
     mlirContext.loadDialect<mlir::LLVM::LLVMDialect>();
     mlirContext.loadDialect<mlir::scf::SCFDialect>();
     mlirContext.loadDialect<mlir::omp::OpenMPDialect>();
+    mlirContext.loadDialect<mlir::arith::ArithDialect>();
     
     // Create a new MLIR module
     mlirModule = mlir::ModuleOp::create(mlirBuilder.getUnknownLoc());
@@ -178,6 +204,11 @@ mlir::LogicalResult convertLLVMToMLIR() {
             F.getName().str(),
             funcType);
         
+        funcOp->setAttr(
+            mlir::SymbolTable::getVisibilityAttrName(),
+            mlirBuilder.getStringAttr("private"));
+              
+        
         mlirBuilder.setInsertionPointToStart(mlirModule->getBody());
         mlirBuilder.insert(funcOp);
     }
@@ -185,29 +216,25 @@ mlir::LogicalResult convertLLVMToMLIR() {
     return mlir::success();
 }
 
-// Fix the pass manager setup in convertMLIRToLLVM
+
 std::unique_ptr<llvm::Module> convertMLIRToLLVM() {
     // Create pass manager
     mlir::PassManager pm(&mlirContext);
     
-    // Add optimization passes
+    // Add passes in the correct order
     pm.addPass(mlir::createCanonicalizerPass());
-    
-    // Convert affine dialect to standard dialect
     pm.addPass(mlir::createLowerAffinePass());
-    
-    // Use these updated pass names
     pm.addPass(mlir::createConvertSCFToCFPass());
+    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
     pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+    pm.addPass(mlir::createConvertFuncToLLVMPass());
     
-    // Skip the problematic FuncToLLVM conversion pass
-    // The MLIR to LLVM translation should still work with basic conversions
-    
-    // Run passes
     if (mlir::failed(pm.run(*mlirModule))) {
         llvm::errs() << "Failed to run MLIR optimization passes\n";
         return nullptr;
     }
+
+    mlirContext.loadDialect<mlir::LLVM::LLVMDialect>();
     
     // Translate MLIR module to LLVM IR
     LLVMContext llvmContext;
@@ -250,46 +277,42 @@ void createAffineForLoop(const std::string& counterName, int lowerBound, int upp
     mlirBuilder.setInsertionPointAfter(affineForOp);
 }
 
-// Create an OpenMP parallel for loop
 void createOpenMPParallelFor(const std::string& counterName, int lowerBound, int upperBound) {
     auto loc = mlirBuilder.getUnknownLoc();
     
     // Create OpenMP parallel operation
-    mlir::ValueRange emptyValueRange{};
     auto parallelOp = mlirBuilder.create<mlir::omp::ParallelOp>(loc);
     
-    // Set up the parallel region body
-    if (!parallelOp.getRegion().empty()) {
-        mlirBuilder.setInsertionPointToStart(&parallelOp.getRegion().front());
-
-
-        // Create SCF for operation inside parallel region
-        auto lowerConstant = mlirBuilder.create<mlir::arith::ConstantOp>(
-            loc, mlirBuilder.getI32IntegerAttr(lowerBound));
-        auto upperConstant = mlirBuilder.create<mlir::arith::ConstantOp>(
-            loc, mlirBuilder.getI32IntegerAttr(upperBound));
-        auto stepConstant = mlirBuilder.create<mlir::arith::ConstantOp>(
-            loc, mlirBuilder.getI32IntegerAttr(1));
-        
-        // Create the for loop
-        auto forOp = mlirBuilder.create<mlir::scf::ForOp>(
-            loc, lowerConstant, upperConstant, stepConstant);
-        
-        // Set up the loop body
-        mlirBuilder.setInsertionPointToStart(forOp.getBody());
-        
-        // Add yield to for loop body
-        mlirBuilder.setInsertionPointToEnd(forOp.getBody());
-        mlirBuilder.create<mlir::scf::YieldOp>(loc);
-
-
-        mlirBuilder.setInsertionPointToEnd(&parallelOp.getRegion().front());
-    }
+    // Set up parallel region body
+    mlir::Block& parallelBlock = parallelOp.getRegion().front();
+    mlirBuilder.setInsertionPointToStart(&parallelBlock);
+    
+    // Create standard SCF for loop inside the parallel region
+    auto lowerConstant = mlirBuilder.create<mlir::arith::ConstantIndexOp>(loc, lowerBound);
+    auto upperConstant = mlirBuilder.create<mlir::arith::ConstantIndexOp>(loc, upperBound);
+    auto stepConstant = mlirBuilder.create<mlir::arith::ConstantIndexOp>(loc, 1);
+    
+    // Create SCF for loop 
+    auto forOp = mlirBuilder.create<mlir::scf::ForOp>(
+        loc, lowerConstant, upperConstant, stepConstant);
+    
+    // FIXED: The proper way to access the body block of an SCF for loop
+    // Use getLoopBody() which returns a Region* then get its front block
+    mlir::Block& loopBlock = forOp.getRegion().front();
+    mlirBuilder.setInsertionPointToStart(&loopBlock);
+    
+    // Add yield to for loop body
+    mlirBuilder.setInsertionPointToEnd(&loopBlock);
+    mlirBuilder.create<mlir::scf::YieldOp>(loc);
+    
+    // Add terminator to parallel region
+    mlirBuilder.setInsertionPointToEnd(&parallelBlock);
     mlirBuilder.create<mlir::omp::TerminatorOp>(loc);
     
-    // Reset insertion point to after the parallel operation
+    // Reset insertion point
     mlirBuilder.setInsertionPointAfter(parallelOp);
 }
+
 
 void optimizeAffineFors() {
     // Convert LLVM module to MLIR
@@ -312,9 +335,15 @@ void optimizeAffineFors() {
             upperBound = (int)constEnd->getValueAPF().convertToDouble();
         }
         
-        // Create both affine and OpenMP loops for demonstration
-        createAffineForLoop(counter, lowerBound, upperBound);
-        createOpenMPParallelFor(counter, lowerBound, upperBound);
+        std::string counterName = counter;
+        
+        // Check if this is a parallel loop
+        if (counterName.substr(0, 9) == "parallel:") {
+            counterName = counterName.substr(9);
+            createOpenMPParallelFor(counterName, lowerBound, upperBound);
+        } else {
+            createAffineForLoop(counterName, lowerBound, upperBound);
+        }
     }
     
     // Convert optimized MLIR module back to LLVM
@@ -325,6 +354,26 @@ void optimizeAffineFors() {
         module = optimizedModule.release();
     }
 }
+
+
+void startParallelForLoop(Value* initVal, const char* counter, Value* endVal) {
+    // Similar to startForLoop but mark it for parallel processing
+    startForLoop(initVal, counter, endVal);
+    
+    // Save additional information to indicate this is a parallel loop
+    std::string counterName = std::string(counter);
+    loopInfo.back() = std::make_tuple(initVal, "parallel:" + counterName, endVal);
+}
+
+void endParallelForLoop() {
+    // Same implementation as endForLoop
+    endForLoop();
+
+      // pop off the last entry so it doesn’t get reused forever
+    if (!loopInfo.empty())
+        loopInfo.pop_back();
+}
+
 
 void printLLVMIR() {
     // Run MLIR optimization if any loops were defined
@@ -346,8 +395,6 @@ void printLLVMIR() {
         }
     }
     
-    // macOS friendly output - using LLVM's raw_fd_ostream
-    // with STDOUT_FILENO which is more portable
     raw_fd_ostream out(STDOUT_FILENO, false);
     module->print(out, nullptr);
     out.flush();

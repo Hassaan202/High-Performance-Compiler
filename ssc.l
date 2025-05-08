@@ -25,6 +25,7 @@
 "if"					{debugFlex(tok_if); return tok_if;}
 "else"					{debugFlex(tok_else); return tok_else;}
 "for"					{debugFlex(tok_for); return tok_for;}
+"pfor"					{debugFlex(tok_pfor); return tok_pfor;}
 "function"				{debugFlex(tok_function); return tok_function;}
 "return"				{debugFlex(tok_return); return tok_return;}
 [a-zA-Z][a-zA-Z0-9_]*			{debugFlex(tok_identifier); yylval.identifier=strdup(yytext); return tok_identifier;}
