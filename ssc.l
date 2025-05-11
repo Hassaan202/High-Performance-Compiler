@@ -36,4 +36,5 @@
 "=="					{debugFlex(tok_eq); return tok_eq;}
 "+"|"-"|"*"|"\/"|"="|";"|"("|")"|","|"{"|"}"|">"|"<"	{debugFlex(yytext[0]); return yytext[0];}
 .					{debugFlex(-1); yyerror("illegal lexeme"); exit(EXIT_FAILURE);}
+
 %%
