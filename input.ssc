@@ -1,11 +1,6 @@
-sum = 0;
-for (i = 0; 10000000000) {
-    sum = sum + i;
-}
-printd(sum);
-
+// openmp loop
 sum1 = 0;
-pfor (i = 0; 10000000000) {
+pfor (i = 0; 1000000000) {
     sum1 = sum1 + i;
 }
 printd(sum1);

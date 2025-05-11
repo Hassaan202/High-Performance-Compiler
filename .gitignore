@@ -28,5 +28,3 @@ ssc.output
 *.tmp
 compile_commands.json
 .cache
-
-output
